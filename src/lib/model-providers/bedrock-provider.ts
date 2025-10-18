@@ -1,0 +1,704 @@
+/**
+ * Amazon Bedrock Provider Implementation
+ * Integration with AWS Bedrock for Claude models
+ */
+
+import {
+  BedrockRuntimeClient,
+  InvokeModelCommand,
+  InvokeModelWithResponseStreamCommand,
+  InvokeModelCommandInput,
+  InvokeModelWithResponseStreamCommandInput
+} from '@aws-sdk/client-bedrock-runtime'
+import {
+  ModelProvider,
+  ModelProviderConfig,
+  ModelRequest,
+  ModelResponse,
+  ModelStreamChunk,
+  ProviderHealthCheck,
+  ModelProviderError,
+  ModelProviderAuthError,
+  ModelProviderRateLimitError
+} from './provider-interface'
+import { BedrockAuth, BedrockAuthConfig } from '../auth/bedrock-auth'
+import { BedrockOptimizer, BedrockOptimizationConfig } from '../optimizations/bedrock-optimizer'
+
+export class BedrockProvider extends ModelProvider {
+  private client!: BedrockRuntimeClient
+  private bedrockAuth!: BedrockAuth
+  private isInitialized: boolean = false
+  private optimizer?: BedrockOptimizer
+  private optimizationConfig?: BedrockOptimizationConfig
+
+  constructor(config: ModelProviderConfig, modelMapping?: any) {
+    super(config, modelMapping)
+    this.initializeClient()
+  }
+
+  private async initializeClient(): Promise<void> {
+    try {
+      const region = this.config.region || process.env.AWS_REGION || 'us-east-1'
+      
+      // Create BedrockAuth configuration from ModelProviderConfig
+      const authConfig: BedrockAuthConfig = {
+        method: 'auto',
+        region,
+        profile: this.config.profile,
+        bedrockApiKey: this.config.apiKey,
+        bedrockApiKeyEnv: this.config.apiKeyEnv,
+        roleArn: this.config.inferenceProfile, // Use inference profile as role ARN if needed
+      }
+
+      // Override method based on configuration
+      if (this.config.useBedrockApiKey) {
+        authConfig.method = 'api_key'
+      } else if (this.config.profile) {
+        authConfig.method = 'cli'
+      } else if (process.env.BEDROCK_AUTH_METHOD) {
+        authConfig.method = process.env.BEDROCK_AUTH_METHOD as any
+      }
+
+      // Initialize authentication
+      this.bedrockAuth = new BedrockAuth(authConfig)
+      const credentials = await this.bedrockAuth.getCredentials()
+
+      // Initialize Bedrock client
+      this.client = new BedrockRuntimeClient({
+        region,
+        credentials,
+        maxAttempts: this.config.maxRetries || 3,
+        requestHandler: {
+          requestTimeout: this.config.timeout || 60000
+        }
+      })
+
+      // Initialize optimizer if configuration is provided
+      this.initializeOptimizations()
+
+      this.isInitialized = true
+    } catch (error: any) {
+      throw new ModelProviderAuthError(
+        `Failed to initialize Bedrock client: ${error.message}`,
+        'bedrock'
+      )
+    }
+  }
+
+  private initializeOptimizations(): void {
+    if (this.optimizationConfig) {
+      this.optimizer = new BedrockOptimizer(this, this.optimizationConfig)
+    }
+  }
+
+  async sendRequest(request: ModelRequest): Promise<ModelResponse> {
+    if (!this.isInitialized) {
+      await this.initializeClient()
+    }
+
+    // Apply optimizations if enabled
+    let optimizedRequest = request
+    let optimizationsApplied: string[] = []
+    let inferenceProfile: string | undefined
+    let region: string | undefined
+    let batchId: string | undefined
+
+    if (this.optimizer) {
+      const optimizationResult = await this.optimizer.optimizeRequest(request)
+      optimizedRequest = optimizationResult.optimizedRequest
+      optimizationsApplied = optimizationResult.optimizationsApplied
+      inferenceProfile = optimizationResult.inferenceProfile
+      region = optimizationResult.region
+      batchId = optimizationResult.batchId
+
+      // If request is batched, handle it separately
+      if (batchId) {
+        // Add to batch and return - actual processing will happen later
+        // For now, we'll continue with regular processing
+      }
+
+      // Update provider configuration if region or inference profile is specified
+      if (region && region !== this.config.region) {
+        await this.setRegion(region)
+      }
+      if (inferenceProfile) {
+        this.useCrossRegionInference(inferenceProfile)
+      }
+    }
+
+    try {
+      // Map model name if needed (use optimized request)
+      const modelId = this.mapModelId(optimizedRequest.model)
+
+      // Prepare the request body in Anthropic format for Bedrock (use optimized request)
+      const requestBody = this.prepareAnthropicRequestBody(optimizedRequest)
+
+      // Create the command
+      const command = new InvokeModelCommand({
+        modelId,
+        contentType: 'application/json',
+        accept: 'application/json',
+        body: Buffer.from(JSON.stringify(requestBody))
+      } as InvokeModelCommandInput)
+
+      // Send the request
+      const response = await this.client.send(command)
+
+      // Parse the response
+      const responseBody = JSON.parse(new TextDecoder().decode(response.body))
+
+      // Convert to common format
+      const modelResponse = this.parseAnthropicResponse(responseBody, modelId)
+
+      // Add optimization metadata to response
+      if (this.optimizer && optimizationsApplied.length > 0) {
+        // Could add optimization metadata to response if needed
+        // For now, just track that optimizations were applied
+      }
+
+      return modelResponse
+    } catch (error: any) {
+      // Handle specific error types
+      if (error.name === 'AccessDeniedException') {
+        throw new ModelProviderAuthError(
+          'Access denied to Bedrock. Check IAM permissions.',
+          'bedrock'
+        )
+      }
+      
+      if (error.name === 'ThrottlingException') {
+        throw new ModelProviderRateLimitError(
+          'Bedrock rate limit exceeded',
+          'bedrock',
+          error.$metadata?.retryAfterSeconds
+        )
+      }
+
+      if (error.name === 'ResourceNotFoundException') {
+        throw new ModelProviderError(
+          `Model not available in region: ${request.model}`,
+          'bedrock',
+          'MODEL_NOT_FOUND',
+          false
+        )
+      }
+
+      throw new ModelProviderError(
+        `Bedrock API error: ${error.message}`,
+        'bedrock',
+        error.name,
+        error.$retryable || false
+      )
+    }
+  }
+
+  async streamRequest(
+    request: ModelRequest,
+    onChunk: (chunk: ModelStreamChunk) => void
+  ): Promise<void> {
+    if (!this.isInitialized) {
+      await this.initializeClient()
+    }
+
+    try {
+      // Map model name if needed
+      const modelId = this.mapModelId(request.model)
+
+      // Prepare the request body
+      const requestBody = this.prepareAnthropicRequestBody(request)
+
+      // Create the streaming command
+      const command = new InvokeModelWithResponseStreamCommand({
+        modelId,
+        contentType: 'application/json',
+        accept: 'application/json',
+        body: Buffer.from(JSON.stringify(requestBody))
+      } as InvokeModelWithResponseStreamCommandInput)
+
+      // Send the request
+      const response = await this.client.send(command)
+
+      // Process the stream
+      if (response.body) {
+        for await (const chunk of response.body) {
+          if (chunk.chunk?.bytes) {
+            const decodedChunk = new TextDecoder().decode(chunk.chunk.bytes)
+            const parsedChunk = JSON.parse(decodedChunk)
+
+            // Handle different chunk types
+            if (parsedChunk.type === 'content_block_delta') {
+              onChunk({
+                type: 'text',
+                content: parsedChunk.delta?.text || ''
+              })
+            } else if (parsedChunk.type === 'message_start') {
+              onChunk({
+                type: 'metadata',
+                metadata: {
+                  model: modelId,
+                  usage: parsedChunk.message?.usage
+                }
+              })
+            } else if (parsedChunk.type === 'message_delta') {
+              onChunk({
+                type: 'metadata',
+                metadata: {
+                  stopReason: parsedChunk.delta?.stop_reason,
+                  usage: parsedChunk.usage
+                }
+              })
+            }
+          }
+        }
+      }
+    } catch (error: any) {
+      onChunk({
+        type: 'error',
+        error: error.message
+      })
+      throw new ModelProviderError(
+        `Bedrock streaming error: ${error.message}`,
+        'bedrock',
+        error.name,
+        error.$retryable || false
+      )
+    }
+  }
+
+  async healthCheck(): Promise<ProviderHealthCheck> {
+    const startTime = Date.now()
+    
+    try {
+      // Try a minimal API call to check connectivity
+      const testRequest: ModelRequest = {
+        messages: [{ role: 'user', content: 'test' }],
+        model: 'haiku',
+        maxTokens: 1
+      }
+
+      await this.sendRequest(testRequest)
+
+      return {
+        isHealthy: true,
+        provider: 'bedrock',
+        latency: Date.now() - startTime,
+        lastChecked: new Date()
+      }
+    } catch (error: any) {
+      return {
+        isHealthy: false,
+        provider: 'bedrock',
+        latency: Date.now() - startTime,
+        error: error.message,
+        lastChecked: new Date()
+      }
+    }
+  }
+
+  async validateAuth(): Promise<boolean> {
+    try {
+      if (!this.isInitialized) {
+        await this.initializeClient()
+      }
+
+      // Use the comprehensive BedrockAuth validation
+      const authResult = await this.bedrockAuth.validateBedrockPermissions()
+      return authResult.isValid && 
+             (authResult.permissions?.canInvokeModel || false)
+    } catch (error: any) {
+      // Fallback to simple API test if BedrockAuth validation fails
+      try {
+        const testRequest: ModelRequest = {
+          messages: [{ role: 'user', content: 'test' }],
+          model: 'haiku',
+          maxTokens: 1
+        }
+
+        await this.sendRequest(testRequest)
+        return true
+      } catch (testError: any) {
+        if (testError.name === 'AccessDeniedException' || 
+            testError.name === 'UnrecognizedClientException') {
+          return false
+        }
+        // Other errors don't necessarily mean auth is invalid
+        return true
+      }
+    }
+  }
+
+  async getAvailableModels(): Promise<string[]> {
+    // Return known Claude models available on Bedrock
+    // Note: Availability varies by region
+    return [
+      'anthropic.claude-3-opus-20240229-v1:0',
+      'anthropic.claude-3-sonnet-20240229-v1:0',
+      'anthropic.claude-3-haiku-20240307-v1:0',
+      'us.anthropic.claude-3-5-sonnet-20241022-v2:0',
+      'us.anthropic.claude-3-5-haiku-20241022-v1:0'
+    ]
+  }
+
+  estimateCost(inputTokens: number, outputTokens: number, model: string): number {
+    // Bedrock pricing per 1000 tokens (as of Nov 2024)
+    const pricing: Record<string, { input: number; output: number }> = {
+      'anthropic.claude-3-opus-20240229-v1:0': { input: 0.015, output: 0.075 },
+      'anthropic.claude-3-sonnet-20240229-v1:0': { input: 0.003, output: 0.015 },
+      'anthropic.claude-3-haiku-20240307-v1:0': { input: 0.00025, output: 0.00125 },
+      'us.anthropic.claude-3-5-sonnet-20241022-v2:0': { input: 0.003, output: 0.015 },
+      'us.anthropic.claude-3-5-haiku-20241022-v1:0': { input: 0.0008, output: 0.004 }
+    }
+
+    const modelPricing = pricing[model] || pricing['us.anthropic.claude-3-5-sonnet-20241022-v2:0']
+    const inputCost = (inputTokens / 1000) * modelPricing.input
+    const outputCost = (outputTokens / 1000) * modelPricing.output
+    
+    return inputCost + outputCost
+  }
+
+  getRateLimits() {
+    // Bedrock rate limits vary by region and model
+    return {
+      requestsPerMinute: 100,
+      tokensPerMinute: 100000,
+      concurrentRequests: 10
+    }
+  }
+
+  /**
+   * Prepare request body in Anthropic format for Bedrock
+   */
+  private prepareAnthropicRequestBody(request: ModelRequest): any {
+    // Convert messages to Anthropic format
+    const messages = request.messages
+      .filter(msg => msg.role !== 'system')
+      .map(msg => ({
+        role: msg.role,
+        content: msg.content
+      }))
+
+    // Extract system message if present
+    const systemMessage = request.messages.find(msg => msg.role === 'system')
+    const system = request.system || systemMessage?.content
+
+    // Prepare the request body
+    const body: any = {
+      anthropic_version: 'bedrock-2023-05-31',
+      messages,
+      max_tokens: request.maxTokens || 4000
+    }
+
+    // Add optional parameters
+    if (request.temperature !== undefined) body.temperature = request.temperature
+    if (request.topP !== undefined) body.top_p = request.topP
+    if (request.topK !== undefined) body.top_k = request.topK
+    if (request.stopSequences) body.stop_sequences = request.stopSequences
+    if (system) body.system = system
+
+    return body
+  }
+
+  /**
+   * Parse Anthropic response from Bedrock
+   */
+  private parseAnthropicResponse(responseBody: any, modelId: string): ModelResponse {
+    // Extract content
+    let content = ''
+    if (responseBody.content && Array.isArray(responseBody.content)) {
+      content = responseBody.content
+        .filter((c: any) => c.type === 'text')
+        .map((c: any) => c.text)
+        .join('')
+    } else if (typeof responseBody.completion === 'string') {
+      content = responseBody.completion
+    }
+
+    // Extract usage metrics
+    const usage = responseBody.usage || {}
+
+    return {
+      content,
+      usage: {
+        inputTokens: usage.input_tokens || 0,
+        outputTokens: usage.output_tokens || 0,
+        totalTokens: (usage.input_tokens || 0) + (usage.output_tokens || 0)
+      },
+      model: modelId,
+      stopReason: responseBody.stop_reason
+    }
+  }
+
+  /**
+   * Set AWS region (Bedrock-specific)
+   */
+  async setRegion(region: string): Promise<void> {
+    this.config.region = region
+    await this.initializeClient()
+  }
+
+  /**
+   * Use cross-region inference profile (Bedrock-specific optimization)
+   */
+  useCrossRegionInference(profileArn: string): void {
+    this.config.inferenceProfile = profileArn
+  }
+
+  /**
+   * Check model availability in current region
+   */
+  async checkModelAvailability(modelId: string): Promise<boolean> {
+    try {
+      const testRequest: ModelRequest = {
+        messages: [{ role: 'user', content: 'test' }],
+        model: modelId,
+        maxTokens: 1
+      }
+
+      await this.sendRequest(testRequest)
+      return true
+    } catch (error: any) {
+      if (error.name === 'ResourceNotFoundException') {
+        return false
+      }
+      // Other errors don't mean the model is unavailable
+      return true
+    }
+  }
+
+  /**
+   * Get detailed authentication status and permissions
+   */
+  async getAuthenticationStatus(): Promise<{
+    isValid: boolean
+    provider: string
+    identity?: {
+      arn?: string
+      userId?: string
+      account?: string
+    }
+    permissions?: {
+      canInvokeModel: boolean
+      canStreamModel: boolean
+      checkedPermissions: string[]
+    }
+    error?: string
+  }> {
+    try {
+      if (!this.isInitialized) {
+        await this.initializeClient()
+      }
+
+      return await this.bedrockAuth.validateBedrockPermissions()
+    } catch (error: any) {
+      return {
+        isValid: false,
+        provider: 'bedrock',
+        error: `Authentication status check failed: ${error.message}`
+      }
+    }
+  }
+
+  /**
+   * Get available authentication methods
+   */
+  static getAuthenticationMethods(): Array<{ method: string; description: string; requirements: string[] }> {
+    return BedrockAuth.getAvailableMethods()
+  }
+
+  /**
+   * Update authentication configuration
+   */
+  async updateAuthConfig(config: Partial<BedrockAuthConfig>): Promise<void> {
+    if (this.bedrockAuth) {
+      this.bedrockAuth.updateConfig(config)
+      // Force re-initialization with new config
+      this.isInitialized = false
+      await this.initializeClient()
+    }
+  }
+
+  /**
+   * Configure optimization settings
+   */
+  setOptimizationConfig(config: BedrockOptimizationConfig): void {
+    this.optimizationConfig = config
+    if (this.isInitialized) {
+      this.initializeOptimizations()
+    }
+  }
+
+  /**
+   * Enable optimizations with default configuration
+   */
+  enableOptimizations(): void {
+    const defaultConfig: BedrockOptimizationConfig = {
+      crossRegionInference: { 
+        enabled: true, 
+        primaryRegion: 'us-east-1',
+        fallbackRegions: ['us-west-2', 'eu-west-1'],
+        inferenceProfiles: {},
+        autoFallback: true,
+        latencyThreshold: 2000
+      },
+      batchInference: { 
+        enabled: true, 
+        batchSize: 20,
+        maxWaitTime: 5000,
+        costThreshold: 0.10,
+        compatibleOperations: ['classification', 'analysis', 'generation']
+      },
+      guardrails: { 
+        enabled: false,
+        trace: false,
+        blockOnViolation: true,
+        customFilters: []
+      },
+      modelInference: { 
+        enabled: true, 
+        adaptiveModelSelection: true,
+        regionSpecificModels: {},
+        performanceMonitoring: true,
+        autoScaling: false
+      },
+      costOptimization: { 
+        enabled: true, 
+        preferCheaperModels: true,
+        spotInstancesUsage: false,
+        reservedCapacity: false,
+        costBudgetLimits: {}
+      },
+      enterprise: { 
+        enabled: false,
+        vpcEndpoints: false,
+        privateSubnets: [],
+        loggingEnabled: true,
+        complianceMode: 'moderate'
+      }
+    }
+    this.setOptimizationConfig(defaultConfig)
+  }
+
+  /**
+   * Enable enterprise optimizations
+   */
+  enableEnterpriseOptimizations(): void {
+    const enterpriseConfig: BedrockOptimizationConfig = {
+      crossRegionInference: { 
+        enabled: true, 
+        primaryRegion: 'us-east-1',
+        fallbackRegions: ['us-west-2', 'eu-west-1'],
+        inferenceProfiles: {},
+        autoFallback: true,
+        latencyThreshold: 1500
+      },
+      batchInference: { 
+        enabled: true, 
+        batchSize: 50,
+        maxWaitTime: 3000,
+        costThreshold: 0.05,
+        compatibleOperations: ['classification', 'analysis', 'generation', 'correlation']
+      },
+      guardrails: { 
+        enabled: true, 
+        blockOnViolation: true, 
+        trace: true,
+        customFilters: []
+      },
+      modelInference: { 
+        enabled: true, 
+        adaptiveModelSelection: true, 
+        performanceMonitoring: true,
+        regionSpecificModels: {},
+        autoScaling: true
+      },
+      costOptimization: { 
+        enabled: true, 
+        reservedCapacity: true,
+        preferCheaperModels: false,
+        spotInstancesUsage: false,
+        costBudgetLimits: {}
+      },
+      enterprise: { 
+        enabled: true, 
+        vpcEndpoints: true, 
+        loggingEnabled: true, 
+        complianceMode: 'strict',
+        privateSubnets: []
+      }
+    }
+    this.setOptimizationConfig(enterpriseConfig)
+  }
+
+  /**
+   * Disable optimizations
+   */
+  disableOptimizations(): void {
+    this.optimizer = undefined
+    this.optimizationConfig = undefined
+  }
+
+  /**
+   * Get optimization metrics
+   */
+  getOptimizationMetrics() {
+    return this.optimizer?.getMetrics()
+  }
+
+  /**
+   * Get inference profile statistics
+   */
+  getInferenceProfileStats() {
+    return this.optimizer?.getInferenceProfileStats()
+  }
+
+  /**
+   * Get optimization recommendations
+   */
+  getOptimizationRecommendations() {
+    return this.optimizer?.getOptimizationRecommendations()
+  }
+
+  /**
+   * Setup cross-region inference
+   */
+  async setupCrossRegionInference(): Promise<void> {
+    if (this.optimizer) {
+      await this.optimizer.setupCrossRegionInference()
+    }
+  }
+
+  /**
+   * Configure GuardRails
+   */
+  async configureGuardRails(guardrailId: string, version?: string): Promise<void> {
+    if (this.optimizer) {
+      await this.optimizer.configureGuardRails(guardrailId, version)
+    }
+  }
+
+  /**
+   * Process batch requests
+   */
+  async processBatchRequests(batchId: string): Promise<ModelResponse[]> {
+    if (this.optimizer) {
+      return await this.optimizer.processBatchRequests(batchId)
+    }
+    throw new ModelProviderError('Optimizer not enabled', 'bedrock')
+  }
+
+  /**
+   * Check if optimizations are enabled
+   */
+  isOptimizationEnabled(): boolean {
+    return !!this.optimizer
+  }
+
+  /**
+   * Update optimization configuration
+   */
+  updateOptimizationConfig(config: Partial<BedrockOptimizationConfig>): void {
+    if (this.optimizer) {
+      this.optimizer.updateConfig(config)
+    }
+  }
+}

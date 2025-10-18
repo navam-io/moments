@@ -1,0 +1,233 @@
+catalogs:
+  companies:
+    name: Companies
+    description: AI startup companies and enterprises
+    source_folders:
+      - ./companies
+    default_folder: ./companies
+    file_patterns:
+      - "*.md"
+      - "*.mdx"
+      - "*.png"
+      - "*.jpg"
+      - "*.jpeg"
+      - "*.webp"
+      - "*.svg"
+    persistence_mode: file_primary
+    auto_sync: true
+    cache_enabled: true
+    cache_ttl_seconds: 3600
+  technologies:
+    name: Technologies
+    description: AI technologies, frameworks, and tools
+    source_folders:
+      - ./technologies
+    default_folder: ./technologies
+    file_patterns:
+      - "*.md"
+      - "*.mdx"
+      - "*.png"
+      - "*.jpg"
+      - "*.jpeg"
+      - "*.webp"
+      - "*.svg"
+    persistence_mode: file_primary
+    auto_sync: true
+    cache_enabled: true
+    cache_ttl_seconds: 3600
+  moments:
+    name: Moments
+    description: Pivotal business moments extracted and analyzed by AI
+    source_folders:
+      - ./moments
+    default_folder: ./moments
+    file_patterns:
+      - "*.md"
+      - "*.mdx"
+    metadata_format: frontmatter
+    persistence_mode: file_primary
+    auto_save: true
+    auto_sync: true
+    sync_mode: bidirectional
+    cache_enabled: true
+    cache_ttl_seconds: 3600
+persistence:
+  strategy: file_system_first
+  cache:
+    enabled: true
+    default_ttl_seconds: 3600
+    max_size_mb: 50
+  file_system:
+    auto_sync: true
+    backup_enabled: true
+    compression_enabled: false
+  local_storage:
+    used_for:
+      - session_cache
+      - temporary_data
+      - performance_optimization
+    clear_on_startup: false
+    versioning: true
+app:
+  name: Moments
+  description: AI Business Intelligence Dashboard
+  version: 0.1.0
+  processing:
+    max_file_size_mb: 10
+    cache_enabled: true
+    cache_ttl_seconds: 3600
+    parallel_processing:
+      enabled: true
+      max_concurrent_sources: 4
+      max_concurrent_content_per_source: 3
+      enable_sub_agent_parallelization: true
+      sub_agent_batch_size: 10
+      api_rate_limiting:
+        requests_per_minute: 120
+        concurrent_requests: 10
+  ui:
+    items_per_page: 20
+    enable_search: true
+    enable_filters: true
+factors:
+  micro:
+    - company
+    - competition
+    - partners
+    - customers
+  macro:
+    - economic
+    - geo_political
+    - regulation
+    - technology
+    - environment
+    - supply_chain
+model_provider:
+  type: anthropic
+  anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+    base_url: https://api.anthropic.com
+    optimizations:
+      prompt_caching:
+        enabled: true
+        cache_key_prefix: moments_
+        min_prompt_length: 100
+        max_cache_size: 1000
+        ttl: 3600
+      beta_features:
+        enabled: true
+        features:
+          - prompt-caching-2024-07-31
+        auto_enable: true
+      streaming:
+        enabled: true
+        buffer_size: 1024
+        adaptive_buffer: true
+        preload_threshold: 0.8
+      request_optimization:
+        enabled: true
+        batch_requests: false
+        connection_pooling: true
+        keep_alive: true
+        retry_with_backoff: true
+      model_optimization:
+        enabled: true
+        auto_select_model: true
+        fallback_models:
+          claude-opus-4-1-20250805:
+            - claude-sonnet-4-20250514
+            - claude-3-5-haiku-latest
+          claude-sonnet-4-20250514:
+            - claude-3-5-haiku-latest
+        cost_optimized_selection: true
+  bedrock:
+    aws_region: us-east-1
+    aws_profile: default
+    use_bedrock_api_key: false
+    inference_profile: null
+    optimizations:
+      cross_region_inference:
+        enabled: true
+        primary_region: us-east-1
+        fallback_regions:
+          - us-west-2
+          - eu-west-1
+        inference_profiles:
+          us-east-1: arn:aws:bedrock:us-east-1:123456789012:inference-profile/us-east-1
+          us-west-2: arn:aws:bedrock:us-west-2:123456789012:inference-profile/us-west-2
+        auto_fallback: true
+        latency_threshold: 2000
+      batch_inference:
+        enabled: true
+        batch_size: 20
+        max_wait_time: 5000
+        cost_threshold: 0.1
+        compatible_operations:
+          - classification
+          - analysis
+          - generation
+      guardrails:
+        enabled: false
+        guardrail_id: null
+        guardrail_version: DRAFT
+        trace: false
+        block_on_violation: true
+        custom_filters: []
+      model_inference:
+        enabled: true
+        adaptive_model_selection: true
+        region_specific_models:
+          us-east-1:
+            - us.anthropic.claude-3-7-sonnet-20250219-v1:0
+            - us.anthropic.claude-3-5-haiku-20241022-v1:0
+        performance_monitoring: true
+        auto_scaling: false
+      cost_optimization:
+        enabled: true
+        prefer_cheaper_models: true
+        spot_instances_usage: false
+        reserved_capacity: false
+        cost_budget_limits:
+          daily: 100
+          monthly: 3000
+      enterprise:
+        enabled: false
+        vpc_endpoints: false
+        private_subnets: []
+        kms_key_id: null
+        iam_role_arn: null
+        logging_enabled: true
+        compliance_mode: moderate
+  model_mapping:
+    sonnet:
+      anthropic: claude-sonnet-4-20250514
+      bedrock: us.anthropic.claude-3-7-sonnet-20250219-v1:0
+    haiku:
+      anthropic: claude-3-5-haiku-latest
+      bedrock: us.anthropic.claude-3-5-haiku-20241022-v1:0
+    opus:
+      anthropic: claude-opus-4-1-20250805
+      bedrock: us.anthropic.claude-opus-4-1-20250805-v1:0
+agents:
+  content_analyzer:
+    enabled: true
+    model: sonnet
+    temperature: 0.3
+    parallel_batch_size: 5
+  classification_agent:
+    enabled: true
+    model: sonnet
+    temperature: 0.2
+    parallel_batch_size: 10
+    enable_parallel_batches: true
+  correlation_engine:
+    enabled: true
+    model: sonnet
+    temperature: 0.4
+    parallel_batch_size: 15
+    enable_parallel_batches: true
+  report_generator:
+    enabled: true
+    model: haiku
+    temperature: 0.5
+    parallel_batch_size: 8
