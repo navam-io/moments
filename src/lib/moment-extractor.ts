@@ -41,7 +41,7 @@ export class MomentExtractor {
    */
   constructor(config: ExtractorConfig = {}) {
     this.config = {
-      model: 'claude-3-5-haiku-20241022', // Using faster Haiku model for analysis
+      model: 'claude-haiku-4-5-20251001', // Using latest Claude 4.5 Haiku (Oct 2025) for fastest analysis
       temperature: 0.3,
       ...config
     }
