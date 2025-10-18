@@ -165,7 +165,7 @@ export class MomentExtractor {
               this.config.onProgress?.({
                 id: `analyze-${sourceName}`,
                 type: 'content_analysis',
-                status: 'failed',
+                status: 'error',
                 startTime: new Date(startTime),
                 description: `Error analyzing ${sourceName} content`,
                 details: errorMessage,
@@ -253,7 +253,7 @@ export class MomentExtractor {
             this.config.onProgress?.({
               id: `analyze-${sourceName}`,
               type: 'content_analysis',
-              status: 'failed',
+              status: 'error',
               startTime: new Date(startTime),
               description: `Error analyzing ${sourceName} content`,
               details: errorMessage,
