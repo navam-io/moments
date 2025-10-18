@@ -41,7 +41,7 @@ export class MomentExtractor {
    */
   constructor(config: ExtractorConfig = {}) {
     this.config = {
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-3-5-haiku-20241022', // Using faster Haiku model for analysis
       temperature: 0.3,
       ...config
     }
@@ -115,10 +115,22 @@ export class MomentExtractor {
       // Process content in parallel batches
       for (let i = 0; i < content.length; i += maxConcurrent) {
         const batch = content.slice(i, i + maxConcurrent)
-        
-        const batchPromises = batch.map(async (item) => {
+
+        const batchPromises = batch.map(async (item, batchIndex) => {
           if (item.type === 'markdown' && item.content) {
             try {
+              // Show immediate progress when starting to process this item
+              const itemNumber = i + batchIndex + 1
+              this.config.onProgress?.({
+                id: `analyze-${sourceName}`,
+                type: 'content_analysis',
+                status: 'running',
+                startTime: new Date(startTime),
+                description: `Analyzing ${sourceName} content in parallel`,
+                details: `Processing ${item.name}... (${itemNumber}/${content.length})`,
+                progress: Math.round(((processedCount + 0.5) / content.length) * 100) // Show partial progress
+              })
+
               const extractedMoments = await this.extractMomentsFromText(
                 item.content,
                 {
@@ -129,8 +141,8 @@ export class MomentExtractor {
                   contentName: item.name
                 }
               )
-              
-              // Update progress atomically
+
+              // Update progress atomically after completion
               processedCount++
               const progress = Math.round((processedCount / content.length) * 100)
               this.config.onProgress?.({
@@ -142,9 +154,10 @@ export class MomentExtractor {
                 details: `Completed ${item.name} (${processedCount}/${content.length})`,
                 progress
               })
-              
+
               return { moments: extractedMoments, errors: [] }
             } catch (error) {
+              processedCount++ // Count failed items too
               const errorMessage = `Failed to analyze ${item.name}: ${error instanceof Error ? error.message : 'Unknown error'}`
               console.error('MomentExtractor parallel error for', item.name, ':', error)
               return { moments: [], errors: [errorMessage] }
@@ -167,20 +180,19 @@ export class MomentExtractor {
     } else {
       // Sequential processing mode (fallback)
       console.log(`[MomentExtractor] Processing ${content.length} items sequentially`)
-      
+
       for (let i = 0; i < content.length; i++) {
         const item = content[i]
-        const progress = Math.round(((i + 1) / content.length) * 100)
 
-        // Update progress
+        // Show immediate progress when starting this item
         this.config.onProgress?.({
           id: `analyze-${sourceName}`,
           type: 'content_analysis',
           status: 'running',
           startTime: new Date(startTime),
           description: `Analyzing ${sourceName} content`,
-          details: `Processing ${item.name} (${i + 1}/${content.length})`,
-          progress
+          details: `Processing ${item.name}... (${i + 1}/${content.length})`,
+          progress: Math.round((i / content.length) * 100)
         })
 
         // Update agent activity
@@ -208,6 +220,17 @@ export class MomentExtractor {
               }
             )
             moments.push(...extractedMoments)
+
+            // Update progress after completion
+            this.config.onProgress?.({
+              id: `analyze-${sourceName}`,
+              type: 'content_analysis',
+              status: 'running',
+              startTime: new Date(startTime),
+              description: `Analyzing ${sourceName} content`,
+              details: `Completed ${item.name} (${i + 1}/${content.length})`,
+              progress: Math.round(((i + 1) / content.length) * 100)
+            })
           } catch (error) {
             const errorMessage = `Failed to analyze ${item.name}: ${error instanceof Error ? error.message : 'Unknown error'}`
             errors.push(errorMessage)
