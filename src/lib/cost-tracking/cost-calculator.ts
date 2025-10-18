@@ -359,6 +359,18 @@ export class CostCalculator {
           currency: 'USD',
           lastUpdated: '2025-10-18'
         },
+        'claude-sonnet-4-5-20250929': {
+          inputTokenCost: 3.00,
+          outputTokenCost: 15.00,
+          currency: 'USD',
+          lastUpdated: '2025-10-18'
+        },
+        'claude-opus-4-1-20250805': {
+          inputTokenCost: 15.00,
+          outputTokenCost: 75.00,
+          currency: 'USD',
+          lastUpdated: '2025-10-18'
+        },
         'claude-3-opus-20240229': {
           inputTokenCost: 15.00,
           outputTokenCost: 75.00,
@@ -374,12 +386,6 @@ export class CostCalculator {
         'claude-3-5-haiku-latest': {
           inputTokenCost: 0.80,
           outputTokenCost: 4.00,
-          currency: 'USD',
-          lastUpdated: '2024-11-01'
-        },
-        'claude-opus-4-1-20250805': {
-          inputTokenCost: 15.00,
-          outputTokenCost: 75.00,
           currency: 'USD',
           lastUpdated: '2024-11-01'
         }
