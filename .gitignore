@@ -3,7 +3,6 @@
 backlog/
 moments/
 specs/
-technologies/
 
 # Dependencies
 node_modules/
