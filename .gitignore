@@ -1,9 +1,3 @@
-# Private
-.claude/
-backlog/
-moments/
-specs/
-
 # Dependencies
 node_modules/
 .pnp
