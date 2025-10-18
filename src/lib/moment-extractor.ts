@@ -41,7 +41,7 @@ export class MomentExtractor {
    */
   constructor(config: ExtractorConfig = {}) {
     this.config = {
-      model: 'claude-haiku-4-5-20251001', // Using latest Claude 4.5 Haiku (Oct 2025) for fastest analysis
+      model: 'claude-3-5-haiku-20241022', // Using Claude 3.5 Haiku - fastest available model
       temperature: 0.3,
       ...config
     }
@@ -160,6 +160,18 @@ export class MomentExtractor {
               processedCount++ // Count failed items too
               const errorMessage = `Failed to analyze ${item.name}: ${error instanceof Error ? error.message : 'Unknown error'}`
               console.error('MomentExtractor parallel error for', item.name, ':', error)
+
+              // Report error in progress indicator
+              this.config.onProgress?.({
+                id: `analyze-${sourceName}`,
+                type: 'content_analysis',
+                status: 'failed',
+                startTime: new Date(startTime),
+                description: `Error analyzing ${sourceName} content`,
+                details: errorMessage,
+                progress: Math.round((processedCount / content.length) * 100)
+              })
+
               return { moments: [], errors: [errorMessage] }
             }
           }
@@ -236,6 +248,17 @@ export class MomentExtractor {
             errors.push(errorMessage)
             console.error('MomentExtractor error for', item.name, ':', error)
             console.log('Content preview:', item.content?.substring(0, 200))
+
+            // Report error in progress indicator
+            this.config.onProgress?.({
+              id: `analyze-${sourceName}`,
+              type: 'content_analysis',
+              status: 'failed',
+              startTime: new Date(startTime),
+              description: `Error analyzing ${sourceName} content`,
+              details: errorMessage,
+              progress: Math.round(((i + 1) / content.length) * 100)
+            })
           }
         }
       }
@@ -287,11 +310,19 @@ export class MomentExtractor {
     }
   ): Promise<PivotalMoment[]> {
     const prompt = this.buildExtractionPrompt(text, context)
-    
+
     // Report the prompt being used
     this.config.onPrompt?.(prompt)
-    
+
+    console.log(`[MomentExtractor] Starting API call for ${context.sourceName}/${context.contentName}`, {
+      model: this.config.model,
+      temperature: this.config.temperature,
+      textLength: text.length,
+      promptLength: prompt.length
+    })
+
     try {
+      const apiStartTime = Date.now()
       const response = await this.anthropic.messages.create({
         model: this.config.model!,
         max_tokens: 4000,
@@ -302,16 +333,42 @@ export class MomentExtractor {
         }]
       })
 
-      const responseText = response.content[0].type === 'text' 
-        ? response.content[0].text 
+      const apiDuration = Date.now() - apiStartTime
+      console.log(`[MomentExtractor] API call completed in ${apiDuration}ms`, {
+        model: this.config.model,
+        responseId: response.id,
+        stopReason: response.stop_reason,
+        usage: response.usage
+      })
+
+      const responseText = response.content[0].type === 'text'
+        ? response.content[0].text
         : ''
 
       return this.parseMomentsResponse(responseText, context)
     } catch (error) {
-      console.error('Error calling Anthropic API for', context.sourceName, '/', context.contentName, ':', error)
+      // Comprehensive error logging
+      console.error(`[MomentExtractor] API call failed for ${context.sourceName}/${context.contentName}`, {
+        model: this.config.model,
+        errorType: error instanceof Error ? error.constructor.name : typeof error,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        errorStack: error instanceof Error ? error.stack : undefined,
+        // @ts-ignore - Anthropic errors may have these properties
+        errorStatus: error?.status,
+        // @ts-ignore
+        errorCode: error?.error?.type,
+        // @ts-ignore
+        errorDetails: error?.error
+      })
+
       if (error instanceof Error && error.message.includes('API key')) {
         throw new Error(`API Key Error: Please check your NEXT_PUBLIC_ANTHROPIC_API_KEY in .env.local`)
       }
+
+      if (error instanceof Error && error.message.includes('model')) {
+        throw new Error(`Model Error: The model "${this.config.model}" may not be available. Error: ${error.message}`)
+      }
+
       throw new Error(`Failed to extract moments from ${context.contentName}: ${error instanceof Error ? error.message : 'Unknown error'}`)
     }
   }
