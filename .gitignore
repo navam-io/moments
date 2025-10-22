@@ -1,3 +1,6 @@
+# Private
+.obsidian/
+
 # Dependencies
 node_modules/
 .pnp
